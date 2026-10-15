@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>隨機迷宮中的 BFS 與 DFS</title>
+  <link rel="stylesheet" href="vendor/codemirror/codemirror.min.css">
+  <link rel="stylesheet" href="vendor/codemirror/theme/material-darker.min.css">
+  <link rel="stylesheet" href="vendor/codemirror/addon/hint/show-hint.min.css">
+  <style>
+    [hidden] { display: none !important; }
+
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
+      color: #172033;
+      background: #f3f6fb;
+    }
+
+    body {
+      max-width: 1100px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+
+    h1 { margin-bottom: 8px; }
+    .intro { color: #526078; line-height: 1.6; }
+
+    .panel {
+      margin-top: 20px;
+      padding: 20px;
+      border: 1px solid #dce3ef;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 4px 14px #1720330a;
+    }
+
+    .controls, .legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+    }
+
+    button {
+      padding: 10px 15px;
+      border: 1px solid #2859b8;
+      border-radius: 7px;
+      color: #fff;
+      background: #2859b8;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover { background: #1e478f; }
+    button:disabled { opacity: .6; cursor: wait; }
+    select {
+      padding: 9px 12px;
+      border: 1px solid #c8d2e2;
+      border-radius: 7px;
+      background: #fff;
+      font: inherit;
+    }
+    #endpoints { color: #526078; }
+    .legend { margin-top: 16px; color: #526078; font-size: .95rem; }
+    .key { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 16px; height: 16px; border-radius: 4px; }
+    .start-swatch { background: #22a06b; }
+    .goal-swatch { background: #e5484d; }
+    .bfs-swatch { background: #b9dcff; }
+    .dfs-swatch { background: #ffddb0; }
+    .path-swatch { background: #2868c7; }
+    .player-swatch { background: #7c3aed; }
+    .explored-swatch { background: #ddd6fe; }
+
+    .results {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .result {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid #dce3ef;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .result h2 { margin: 0 0 8px; font-size: 1.15rem; }
+    .result p { min-height: 3em; margin: 0; color: #526078; line-height: 1.5; }
+    .map-scroll { min-width: 0; margin-top: 12px; }
+    .maze-map { display: block; width: 100%; height: auto; }
+    .stats { display: block; margin-top: 10px; font-weight: 600; }
+    #message { min-height: 1.5em; margin-bottom: 0; color: #526078; }
+    #challenge-message { min-height: 1.5em; color: #526078; }
+    .challenge-layout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: start;
+      gap: 18px;
+      margin-top: 16px;
+    }
+    .challenge-column {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid #dce3ef;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .challenge-map-wrap { margin-top: 12px; }
+    .challenge-map { display: block; width: 100%; height: auto; }
+    .challenge-help { color: #526078; line-height: 1.6; }
+    .challenge-actions { margin-top: 14px; }
+    .CodeMirror {
+      height: auto;
+      min-height: 320px;
+      max-height: 520px;
+      margin-top: 12px;
+      border: 1px solid #384454;
+      border-radius: 7px;
+      font: .95rem/1.55 Consolas, "Courier New", monospace;
+    }
+    .CodeMirror-scroll { min-height: 320px; max-height: 520px; }
+    .CodeMirror pre { padding: 0; border-radius: 0; background: transparent; }
+    .CodeMirror-gutters { border-right-color: #384454; }
+    .CodeMirror-hints {
+      z-index: 20;
+      max-width: min(560px, 80vw);
+      border: 1px solid #526078;
+      border-radius: 6px;
+      background: #202b3b;
+      box-shadow: 0 8px 24px #0006;
+      font: .9rem Consolas, "Courier New", monospace;
+    }
+    .CodeMirror-hint {
+      max-width: 540px;
+      overflow: hidden;
+      color: #e6edf7;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    li.CodeMirror-hint-active {
+      color: #fff;
+      background: #2859b8;
+    }
+    #code-hint {
+      min-height: 2.8em;
+      margin: 8px 0 0;
+      color: #526078;
+      font-size: .92rem;
+      line-height: 1.5;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 12px;
+      border-radius: 7px;
+      background: #f3f6fb;
+      line-height: 1.5;
+    }
+    #challenge-api { white-space: pre-wrap; overflow-wrap: anywhere; }
+    #challenge-result { display: block; min-height: 1.5em; margin-top: 12px; }
+
+    @media (max-width: 760px) {
+      body { margin-top: 24px; }
+      .results { grid-template-columns: 1fr; }
+      .challenge-layout { grid-template-columns: 1fr; }
+      .result p { min-height: 0; }
+    }
+  </style>
+</head>
+<body>
+  <h1>隨機迷宮：BFS 與 DFS</h1>
+  <p class="intro">每次開啟或重新生成，都會建立一座新的迷宮，並隨機挑選起點和終點。觀察 BFS、DFS 的搜尋動畫，或進入挑戰自己寫搜尋算法。</p>
+
+  <section id="comparison-panel" class="panel">
+    <div class="controls">
+      <button id="generate" type="button">重新生成迷宮</button>
+      <button id="open-challenge" type="button">挑戰模式：自己寫算法</button>
+      <span id="endpoints"></span>
+    </div>
+    <div class="legend" aria-label="路線圖圖例">
+      <span class="key"><span class="swatch start-swatch"></span>起點</span>
+      <span class="key"><span class="swatch goal-swatch"></span>終點</span>
+      <span class="key"><span class="swatch bfs-swatch"></span>BFS 探索過</span>
+      <span class="key"><span class="swatch dfs-swatch"></span>DFS 探索過</span>
+      <span class="key"><span class="swatch path-swatch"></span>找到的路徑</span>
+      <span class="key"><span class="swatch player-swatch"></span>目前位置</span>
+    </div>
+    <p id="message" role="status" aria-live="polite"></p>
+  </section>
+
+  <section id="challenge-panel" class="panel" hidden>
+    <div class="controls">
+      <button id="close-challenge" type="button">返回比較模式</button>
+    </div>
+    <p id="challenge-endpoints" class="challenge-help"></p>
+    <p class="challenge-help">請自行完成 JavaScript 的搜尋算法，再按「完成並評分」。系統會在隔離的執行環境中執行你的程式、驗證路徑，並依路徑長度與探索格數評分。提示：BFS 使用先進先出的佇列；DFS 使用後進先出的堆疊或遞迴。</p>
+    <p class="challenge-help">評分方式：路徑品質最高 40 分、探索格數最高 40 分、程式執行效率最高 20 分；執行效率依程式編譯與執行時間計算：低於 1 毫秒得 20 分、低於 10 毫秒得 16 分、低於 100 毫秒得 12 分、低於 1 秒得 8 分，其餘在時限內完成得 4 分。未抵達得 1 分；超過 5 秒會停止執行。時間複雜度參考：理想 BFS／DFS 為 O(V + E)，V 是可走格數、E 是相鄰連線數。</p>
+    <div class="challenge-column">
+      <strong>提供給算法的資料與 API</strong>
+      <pre id="challenge-api"></pre>
+      <p id="algorithm-help" class="challenge-help">函式必須命名為 <code>solve</code>，並回傳 <code>{ path, explored }</code>。兩者都是格子 ID 字串陣列；<code>explored</code> 要記錄呼叫 <code>getNeighbors</code> 擴展過的格子，找到終點後也要把終點列入。結果會顯示你的程式編譯與執行時間；動畫時間不列入計算。</p>
+    </div>
+    <div class="challenge-layout">
+      <div class="challenge-column">
+        <label for="algorithm-code"><strong>你的 JavaScript 算法</strong></label>
+        <textarea id="algorithm-code" spellcheck="false" aria-describedby="algorithm-help code-hint"></textarea>
+        <p id="code-hint" aria-live="polite"></p>
+      </div>
+      <div class="challenge-column">
+        <strong>迷宮與執行結果</strong>
+        <div class="legend" aria-label="挑戰模式圖例">
+          <span class="key"><span class="swatch start-swatch"></span>起點</span>
+          <span class="key"><span class="swatch goal-swatch"></span>終點</span>
+          <span class="key"><span class="swatch explored-swatch"></span>探索過</span>
+          <span class="key"><span class="swatch player-swatch"></span>找到的路徑</span>
+        </div>
+        <div class="challenge-map-wrap">
+          <svg id="challenge-map" class="challenge-map" role="img" aria-label="挑戰模式迷宮"></svg>
+        </div>
+        <output id="challenge-message" role="status" aria-live="polite"></output>
+        <output id="challenge-result" role="status" aria-live="polite"></output>
+        <div class="controls challenge-actions">
+          <button id="submit-algorithm" type="button">完成並評分</button>
+          <button id="new-challenge" type="button">換一題</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results" class="panel results" aria-live="polite">
+    <article class="result">
+      <h2>BFS：廣度優先搜尋</h2>
+      <p>一層一層往外找；在這個每一步代價相同的迷宮中，找到的路徑步數最少。</p>
+      <div class="map-scroll">
+        <svg id="bfs-map" class="maze-map" role="img" aria-label="BFS 探索結果迷宮圖"></svg>
+      </div>
+      <output id="bfs-stats" class="stats"></output>
+    </article>
+    <article class="result">
+      <h2>DFS：深度優先搜尋</h2>
+      <p>先沿著岔路往前走，走不通再回頭；找到終點就停止，不保證路徑最短。</p>
+      <div class="map-scroll">
+        <svg id="dfs-map" class="maze-map" role="img" aria-label="DFS 探索結果迷宮圖"></svg>
+      </div>
+      <output id="dfs-stats" class="stats"></output>
+    </article>
+  </section>
+
+  <script src="vendor/codemirror/codemirror.min.js"></script>
+  <script src="vendor/codemirror/mode/javascript/javascript.min.js"></script>
+  <script src="vendor/codemirror/addon/hint/show-hint.min.js"></script>
+  <script src="vendor/codemirror/addon/edit/matchbrackets.min.js"></script>
+  <script src="bfs-dfs.js"></script>
+</body>
+</html>
