@@ -16,15 +16,26 @@ function parseCellKey(key) {
   return key.split(",").map(Number);
 }
 
-function shuffle(items) {
+function createRandom(seed) {
+  let state = seed;
+  return () => {
+    state = (state + 0x6D2B79F5) | 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffle(items, random = Math.random) {
   for (let index = items.length - 1; index > 0; index -= 1) {
-    const otherIndex = Math.floor(Math.random() * (index + 1));
+    const otherIndex = Math.floor(random() * (index + 1));
     [items[index], items[otherIndex]] = [items[otherIndex], items[index]];
   }
   return items;
 }
 
-function createMaze(rows, columns) {
+function createMaze(rows, columns, random = Math.random, extraPassageChance = 0.08) {
   const cells = Array.from({ length: rows }, () =>
     Array.from({ length: columns }, () => ({
       walls: { top: true, right: true, bottom: true, left: true },
@@ -36,7 +47,7 @@ function createMaze(rows, columns) {
 
   while (stack.length > 0) {
     const [row, column] = stack[stack.length - 1];
-    const neighbors = shuffle([...DIRECTIONS]).filter(({ row: dr, column: dc }) => {
+    const neighbors = shuffle([...DIRECTIONS], random).filter(({ row: dr, column: dc }) => {
       const nextRow = row + dr;
       const nextColumn = column + dc;
       return nextRow >= 0
@@ -62,11 +73,19 @@ function createMaze(rows, columns) {
 
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      if (column < columns - 1 && cells[row][column].walls.right && Math.random() < 0.08) {
+      if (
+        column < columns - 1
+        && cells[row][column].walls.right
+        && random() < extraPassageChance
+      ) {
         cells[row][column].walls.right = false;
         cells[row][column + 1].walls.left = false;
       }
-      if (row < rows - 1 && cells[row][column].walls.bottom && Math.random() < 0.08) {
+      if (
+        row < rows - 1
+        && cells[row][column].walls.bottom
+        && random() < extraPassageChance
+      ) {
         cells[row][column].walls.bottom = false;
         cells[row + 1][column].walls.top = false;
       }
@@ -93,7 +112,7 @@ function getNeighbors(cells, row, column) {
   });
 }
 
-function chooseEndpoints(cells) {
+function chooseEndpoints(cells, random = Math.random) {
   const candidates = [];
   for (let row = 0; row < cells.length; row += 1) {
     for (let column = 0; column < cells[0].length; column += 1) {
@@ -107,7 +126,7 @@ function chooseEndpoints(cells) {
     ? candidates
     : cells.flatMap((row, rowIndex) =>
       row.map((_, columnIndex) => cellKey(rowIndex, columnIndex)),
-    ));
+    ), random);
   return [endpoints[0], endpoints[1]];
 }
 
@@ -402,33 +421,67 @@ document.querySelector("#generate").addEventListener("click", generateAndSolve);
 
 let challengeState;
 let challengeRunId = 0;
+let pendingRankRecord = null;
+let realtimeDatabaseUrl = "";
+let leaderboardRecords = [];
+let firebaseApiKey = "";
+let authSession = null;
+let authMode = "login";
+let uploadDialogMode = "upload";
+let challengeResultSummary = "";
+let rankEligibilityCheckId = 0;
 
 const starterCode = `function solve({ start, goal, getNeighbors }) {
-  const frontier = [start];
-  const visited = new Set([start]);
+  const queue = [start];
+  let index = 0;
   const parent = new Map([[start, null]]);
   const explored = [];
 
-  // TODO: 自己寫搜尋流程
-  // 提示：用 frontier 保存待檢查的格子。
-  // 每次取出一格，把它加入 explored。
-  // 用 getNeighbors(格子ID) 取得可走的相鄰格子。
-  // 用 visited 避免重複加入，並用 parent 記錄如何抵達。
-  // 找到 goal 後，從 parent 回溯組成 path。
+  while (index < queue.length) {
+    const current = queue[index];
+    index += 1;
+    explored.push(current);
 
-  return { path: [], explored };
+    if (current === goal) {
+      break;
+    }
+
+    for (const next of getNeighbors(current)) {
+      if (!parent.has(next)) {
+        parent.set(next, current);
+        queue.push(next);
+      }
+    }
+  }
+
+  if (!parent.has(goal)) {
+    return { path: [], explored };
+  }
+
+  const path = [];
+  for (let current = goal; current !== null; current = parent.get(current)) {
+    path.push(current);
+  }
+  path.reverse();
+  return { path, explored };
 }`;
 
-function createChallenge() {
+function createChallenge(seedOverride) {
   challengeRunId += 1;
-  const cells = createMaze(ROWS, COLUMNS);
-  const [start, goal] = chooseEndpoints(cells);
-  challengeState = { cells, start, goal };
+  pendingRankRecord = null;
+  document.querySelector("#upload-score").disabled = true;
+  document.querySelector("#upload-score").hidden = true;
+  challengeResultSummary = "";
+  const seed = seedOverride ?? Math.floor(Math.random() * 0x100000000);
+  const random = createRandom(seed);
+  const cells = createMaze(ROWS, COLUMNS, random);
+  const [start, goal] = chooseEndpoints(cells, random);
+  challengeState = { cells, start, goal, seed };
 
   const map = document.querySelector("#challenge-map");
   renderMaze(map, cells, start, goal, { explored: [], path: [] }, "CHALLENGE", true);
   document.querySelector("#challenge-endpoints").textContent =
-    `起點：${describeCell(start)}　　終點：${describeCell(goal)}`;
+    `隨機迷宮 ${ROWS} × ${COLUMNS}｜起點：${describeCell(start)}　　終點：${describeCell(goal)}`;
   document.querySelector("#challenge-api").textContent = [
     `start = "${start}"`,
     `goal = "${goal}"`,
@@ -436,12 +489,33 @@ function createChallenge() {
     "",
     '格子 ID 格式為 "row,column"，row 和 column 從 0 開始。',
     "getNeighbors(id) 會傳回可直接走到的相鄰格子 ID。",
+    `迷宮碼：${formatMazeCode(seed)}`,
     "完成後回傳 { path: [起點到終點的 ID], explored: [擴展過的 ID] }。",
   ].join("\n");
   document.querySelector("#challenge-message").textContent = "編寫算法後，按「完成並評分」。";
-  document.querySelector("#challenge-result").textContent = "";
   document.querySelector("#submit-algorithm").disabled = false;
+  document.querySelector("#challenge-result").textContent = "";
   editor.refresh();
+}
+
+function formatMazeCode(seed) {
+  return `MZ-${seed.toString(16).padStart(8, "0").toUpperCase()}`;
+}
+
+function loadMazeFromCode() {
+  const input = document.querySelector("#maze-code-input");
+  const mazeCode = input.value.trim().toUpperCase();
+  const match = /^MZ-([0-9A-F]{8})$/.exec(mazeCode);
+  if (!match) {
+    document.querySelector("#challenge-message").textContent =
+      "迷宮碼格式錯誤，請輸入 MZ- 加上 8 位英數字（0–9、A–F）。";
+    return;
+  }
+
+  input.value = mazeCode;
+  createChallenge(Number.parseInt(match[1], 16));
+  document.querySelector("#challenge-message").textContent =
+    `已載入迷宮 ${mazeCode}。請完成算法後評分。`;
 }
 
 function describeCell(key) {
@@ -546,7 +620,11 @@ function runUserCode(source, apiData, timeoutMilliseconds = 5000) {
       cleanup();
       reject(new Error("程式回傳的結果無法讀取。"));
     };
-    worker.postMessage({ ...apiData, source, maxCells: ROWS * COLUMNS });
+    worker.postMessage({
+      ...apiData,
+      source,
+      maxCells: Object.keys(apiData.adjacency).length,
+    });
   });
 }
 
@@ -587,39 +665,41 @@ function validateUserResult(result, apiData) {
   return { reached: true, path, explored };
 }
 
-function calculateScore(userResult, cells, start, goal, executionMs) {
+function calculateMazeDifficulty(cells, start, goal) {
+  const reference = breadthFirstSearch(cells, start, goal);
+  const totalCells = cells.length * cells[0].length;
+  const pathFactor = Math.min(1, (reference.path.length - 1) / (totalCells * 0.22));
+  const explorationFactor = Math.min(1, reference.explored.length / (totalCells * 0.75));
+  const level = Math.max(
+    1,
+    Math.min(10, Math.round(1 + 9 * (pathFactor + explorationFactor) / 2)),
+  );
+  return { level, shortestSteps: reference.path.length - 1 };
+}
+
+function calculateScore(userResult, cells, start, goal, totalWaitMs) {
   const reference = breadthFirstSearch(cells, start, goal);
   const shortestSteps = reference.path.length - 1;
   const userSteps = userResult.path.length - 1;
   const routePoints = 40 * shortestSteps / userSteps;
   const totalCells = cells.length * cells[0].length;
-  const referenceExplored = reference.explored.length;
-  const explorationPoints = totalCells === referenceExplored
-    ? (userResult.explored.length <= referenceExplored ? 40 : 0)
+  const minimumExplored = userResult.path.length;
+  const explorationRange = totalCells - minimumExplored;
+  const explorationPoints = explorationRange === 0
+    ? 40
     : 40 * Math.max(
       0,
-      Math.min(
-        1,
-        (totalCells - userResult.explored.length) / (totalCells - referenceExplored),
-      ),
+      (totalCells - userResult.explored.length) / explorationRange,
     );
-  const executionEfficiencyPoints = executionMs < 1
-    ? 20
-    : executionMs < 10
-      ? 16
-      : executionMs < 100
-        ? 12
-        : executionMs < 1000
-          ? 8
-          : 4;
+  const executionEfficiencyPoints = 20 * Math.max(0, 1 - totalWaitMs / 5000);
   return {
     score: Math.max(
       1,
       Math.min(100, Math.round(routePoints + explorationPoints + executionEfficiencyPoints)),
     ),
     shortestSteps,
-    routePoints: Math.round(routePoints),
-    explorationPoints: Math.round(explorationPoints),
+    routePoints,
+    explorationPoints,
     executionEfficiencyPoints,
   };
 }
@@ -629,13 +709,20 @@ async function submitAlgorithm() {
     return;
   }
 
+  pendingRankRecord = null;
+  document.querySelector("#upload-score").disabled = true;
+  document.querySelector("#upload-score").hidden = true;
+  const waitStartedAt = performance.now();
   const runId = ++challengeRunId;
-  const { cells, start, goal } = challengeState;
+  const { cells, start, goal, seed } = challengeState;
+  const mazeDifficulty = calculateMazeDifficulty(cells, start, goal);
+  const mazeCode = `MZ-${seed.toString(16).padStart(8, "0").toUpperCase()}`;
   const apiData = createMazeApi(cells, start, goal);
   const map = document.querySelector("#challenge-map");
   const submitButton = document.querySelector("#submit-algorithm");
   const message = document.querySelector("#challenge-message");
   const resultOutput = document.querySelector("#challenge-result");
+  challengeResultSummary = "";
   renderMaze(map, cells, start, goal, { explored: [], path: [] }, "CHALLENGE", true);
   submitButton.disabled = true;
   message.textContent = "正在隔離環境中執行你的算法……";
@@ -661,8 +748,9 @@ async function submitAlgorithm() {
         true,
       );
       message.textContent = "尚未抵達終點。檢查搜尋流程和 path 的回溯結果後再試一次。";
+      const totalWaitMs = performance.now() - waitStartedAt;
       resultOutput.textContent =
-        `目前探索 ${evaluated.explored.length} 格｜程式執行 ${rawResult.executionMs.toFixed(2)} 毫秒｜未抵達終點，評分 1 / 100。`;
+        `迷宮難度 ${mazeDifficulty.level} / 10｜迷宮碼 ${mazeCode}｜實際等待 ${(totalWaitMs / 1000).toFixed(2)} 秒（算法執行 ${rawResult.executionMs.toFixed(2)} 毫秒）｜探索 ${evaluated.explored.length} 格｜未抵達終點，評分 1 / 100。`;
       return;
     }
 
@@ -707,10 +795,25 @@ async function submitAlgorithm() {
     }
 
     if (runId === challengeRunId) {
-      const score = calculateScore(evaluated, cells, start, goal, rawResult.executionMs);
+      const totalWaitMs = performance.now() - waitStartedAt;
+      const score = calculateScore(evaluated, cells, start, goal, totalWaitMs);
       message.textContent = "成功抵達終點！";
-      resultOutput.textContent =
-        `評分 ${score.score} / 100｜路徑 ${evaluated.path.length - 1} 步（最短 ${score.shortestSteps} 步，${score.routePoints}/40 分）｜探索 ${evaluated.explored.length} 格（${score.explorationPoints}/40 分）｜執行 ${rawResult.executionMs.toFixed(2)} 毫秒（執行效率 ${score.executionEfficiencyPoints}/20 分）`;
+      challengeResultSummary =
+        `評分 ${score.score} / 100｜迷宮難度 ${mazeDifficulty.level} / 10｜迷宮碼 ${mazeCode}｜路徑 ${evaluated.path.length - 1} 步（最短 ${score.shortestSteps} 步，${score.routePoints.toFixed(1)}/40 分）｜探索 ${evaluated.explored.length} 格（${score.explorationPoints.toFixed(1)}/40 分）｜實際等待 ${(totalWaitMs / 1000).toFixed(2)} 秒（效率 ${score.executionEfficiencyPoints.toFixed(1)}/20 分；算法執行 ${rawResult.executionMs.toFixed(2)} 毫秒）`;
+      resultOutput.textContent = challengeResultSummary;
+      pendingRankRecord = {
+        mazeCode,
+        difficultyLevel: mazeDifficulty.level,
+        score: score.score,
+        pathSteps: evaluated.path.length - 1,
+        exploredCells: evaluated.explored.length,
+        totalWaitMs: Math.round(totalWaitMs),
+        executionMs: Number(rawResult.executionMs.toFixed(2)),
+      };
+      await updatePendingRankEligibility();
+      if (!realtimeDatabaseUrl) {
+        resultOutput.textContent += "｜資料庫尚未連線，請透過本機伺服器載入設定後再上傳。";
+      }
     }
   } catch (error) {
     if (runId === challengeRunId) {
@@ -734,16 +837,657 @@ function openChallenge() {
 
 function closeChallenge() {
   challengeRunId += 1;
+  pendingRankRecord = null;
+  document.querySelector("#upload-score").disabled = true;
+  document.querySelector("#upload-score").hidden = true;
   document.querySelector("#submit-algorithm").disabled = false;
   document.querySelector("#challenge-panel").hidden = true;
   document.querySelector("#comparison-panel").hidden = false;
   document.querySelector("#results").hidden = false;
 }
 
+function getLeaderboardEntry(value) {
+  if (
+    !value
+    || typeof value.name !== "string"
+    || !/^MZ-[0-9A-F]{8}$/.test(value.mazeCode)
+    || !Number.isInteger(value.score)
+    || value.score < 1
+    || value.score > 100
+    || !Number.isInteger(value.difficultyLevel)
+    || value.difficultyLevel < 1
+    || value.difficultyLevel > 10
+    || !Number.isInteger(value.exploredCells)
+    || !Number.isInteger(value.pathSteps)
+    || !Number.isFinite(value.totalWaitMs)
+    || !Number.isFinite(value.executionMs)
+    || !Number.isFinite(value.createdAt)
+  ) {
+    return null;
+  }
+  const name = value.name.trim();
+  if (!name || Array.from(name).length > 30) {
+    return null;
+  }
+  return { ...value, name };
+}
+
+function getUserMazeRecords(userRecords) {
+  const directRecord = getLeaderboardEntry(userRecords);
+  return directRecord
+    ? [directRecord]
+    : Object.values(userRecords ?? {}).map(getLeaderboardEntry).filter(Boolean);
+}
+
+function renderLeaderboard() {
+  const body = document.querySelector("#leaderboard-records");
+  const filter = document.querySelector("#leaderboard-maze-filter");
+  const selectedMazeCode = filter.value;
+  const mazeCodes = [...new Set(leaderboardRecords.map(({ mazeCode }) => mazeCode))].sort();
+  filter.replaceChildren(new Option("所有迷宮", ""));
+  for (const mazeCode of mazeCodes) {
+    filter.add(new Option(mazeCode, mazeCode));
+  }
+  const mazeCodeOptions = document.querySelector("#maze-code-options");
+  mazeCodeOptions.replaceChildren(
+    ...mazeCodes.map((mazeCode) => new Option(mazeCode, mazeCode)),
+  );
+  if (mazeCodes.includes(selectedMazeCode)) {
+    filter.value = selectedMazeCode;
+  }
+
+  const bestByPlayerAndMaze = new Map();
+  for (const record of leaderboardRecords) {
+    const key = `${record.userId ?? record.name}:${record.mazeCode}`;
+    const current = bestByPlayerAndMaze.get(key);
+    if (
+      !current
+      || record.score > current.score
+      || (record.score === current.score && record.totalWaitMs < current.totalWaitMs)
+    ) {
+      bestByPlayerAndMaze.set(key, record);
+    }
+  }
+  const filteredRecords = [...bestByPlayerAndMaze.values()].filter(({ mazeCode }) =>
+    !filter.value || mazeCode === filter.value,
+  );
+  filteredRecords.sort((first, second) => filter.value
+    ? second.score - first.score
+      || first.totalWaitMs - second.totalWaitMs
+      || first.exploredCells - second.exploredCells
+      || second.createdAt - first.createdAt
+    : second.createdAt - first.createdAt,
+  );
+
+  body.replaceChildren();
+  for (const [index, record] of filteredRecords.entries()) {
+    const row = document.createElement("tr");
+    const cells = [
+      index + 1,
+      record.name,
+      record.score,
+      `${record.difficultyLevel} / 10`,
+      record.mazeCode,
+      record.exploredCells,
+      record.pathSteps,
+      `${(record.totalWaitMs / 1000).toFixed(2)} 秒`,
+      new Date(record.createdAt).toLocaleString(),
+    ];
+    for (const value of cells) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+
+  document.querySelector("#leaderboard-status").textContent =
+    filter.value
+      ? `迷宮 ${filter.value}：${filteredRecords.length} 筆紀錄（依分數、等待時間、探索格數排序）。`
+      : `目前顯示所有玩家紀錄，共 ${filteredRecords.length} 筆；可用迷宮碼篩選。`;
+}
+
+async function refreshLeaderboard() {
+  const status = document.querySelector("#leaderboard-status");
+  const refreshButton = document.querySelector("#refresh-leaderboard");
+  if (!realtimeDatabaseUrl) {
+    status.textContent = "排行榜資料庫尚未連線。";
+    return;
+  }
+
+  refreshButton.disabled = true;
+  status.textContent = "正在載入玩家紀錄……";
+  try {
+    const response = await fetch(`${realtimeDatabaseUrl}/maze.json`);
+    if (!response.ok) {
+      throw new Error(`Firebase 讀取失敗（HTTP ${response.status}）。請檢查 Realtime Database Rules。`);
+    }
+    const data = await response.json();
+    leaderboardRecords = data && typeof data === "object"
+      ? Object.entries(data).flatMap(([uid, userRecords]) => {
+        if (!userRecords || typeof userRecords !== "object") {
+          return [];
+        }
+        return getUserMazeRecords(userRecords).map((record) => ({
+          ...record,
+          userId: uid,
+        }));
+      })
+      : [];
+    renderLeaderboard();
+  } catch (error) {
+    status.textContent = `排行榜載入失敗：${error.message}`;
+  } finally {
+    refreshButton.disabled = false;
+  }
+}
+
+async function initializeLeaderboard() {
+  const status = document.querySelector("#leaderboard-status");
+  if (location.protocol === "file:") {
+    status.textContent =
+      "Firebase 設定檔無法從 file:// 網址載入。請使用工作目錄內的 start-local-server.bat 開啟網站。";
+    return;
+  }
+
+  try {
+    const response = await fetch("./config/firebaseConfig.json", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Firebase 設定檔讀取失敗（HTTP ${response.status}）。`);
+    }
+    const config = await response.json();
+    const databaseUrl = new URL(config.databaseURL);
+    if (databaseUrl.protocol !== "https:" || typeof config.apiKey !== "string" || !config.apiKey) {
+      throw new Error("Firebase 設定需包含 HTTPS databaseURL 與 apiKey。");
+    }
+    realtimeDatabaseUrl = databaseUrl.href.replace(/\/+$/, "");
+    firebaseApiKey = config.apiKey;
+    await restoreAuthSession();
+    await refreshLeaderboard();
+  } catch (error) {
+    status.textContent = `排行榜初始化失敗：${error.message}`;
+  } finally {
+    if (pendingRankRecord) {
+      await updatePendingRankEligibility();
+    }
+  }
+}
+
+function updateAuthStatus() {
+  const status = document.querySelector("#auth-status");
+  const openAuthButton = document.querySelector("#open-auth");
+  const changeNameButton = document.querySelector("#change-player-name");
+  const signOutButton = document.querySelector("#sign-out");
+  if (authSession) {
+    status.textContent = `已登入：${authSession.email}`;
+    openAuthButton.hidden = true;
+    changeNameButton.hidden = false;
+    signOutButton.hidden = false;
+  } else {
+    status.textContent = "尚未登入";
+    openAuthButton.hidden = false;
+    changeNameButton.hidden = true;
+    signOutButton.hidden = true;
+  }
+}
+
+function saveAuthSession(session) {
+  authSession = session;
+  localStorage.setItem("mazeFirebaseAuth", JSON.stringify(session));
+  updateAuthStatus();
+}
+
+function clearAuthSession() {
+  authSession = null;
+  localStorage.removeItem("mazeFirebaseAuth");
+  updateAuthStatus();
+}
+
+async function readFirebaseResponse(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const errorCode = data.error?.message ?? `HTTP_${response.status}`;
+    throw new Error(describeFirebaseAuthError(errorCode));
+  }
+  return data;
+}
+
+function describeFirebaseAuthError(code) {
+  const messages = {
+    EMAIL_EXISTS: "這個電子郵件已註冊，請直接登入。",
+    INVALID_EMAIL: "電子郵件格式不正確。",
+    INVALID_PASSWORD: "密碼錯誤，或密碼長度未達 6 個字元。",
+    INVALID_LOGIN_CREDENTIALS: "電子郵件或密碼錯誤。",
+    EMAIL_NOT_FOUND: "找不到這個帳號，請先註冊。",
+    USER_DISABLED: "此帳號已停用，請聯絡管理員。",
+    WEAK_PASSWORD: "密碼至少需要 6 個字元。",
+    TOO_MANY_ATTEMPTS_TRY_LATER: "嘗試次數過多，請稍後再試。",
+    OPERATION_NOT_ALLOWED: "Firebase 尚未啟用 Email/Password 登入方式。",
+    TOKEN_EXPIRED: "登入已過期，請重新登入。",
+    INVALID_REFRESH_TOKEN: "登入已過期，請重新登入。",
+  };
+  return messages[code] ?? `Firebase 驗證失敗：${code}`;
+}
+
+async function restoreAuthSession() {
+  const storedSession = localStorage.getItem("mazeFirebaseAuth");
+  if (!storedSession) {
+    updateAuthStatus();
+    return;
+  }
+
+  try {
+    authSession = JSON.parse(storedSession);
+    if (
+      typeof authSession.email !== "string"
+      || typeof authSession.refreshToken !== "string"
+      || typeof authSession.expiresAt !== "number"
+    ) {
+      throw new Error("儲存的登入資料格式錯誤。");
+    }
+    if (
+      typeof authSession.uid !== "string"
+      || !authSession.uid
+      || authSession.expiresAt <= Date.now() + 60_000
+    ) {
+      await refreshAuthToken();
+    } else {
+      updateAuthStatus();
+    }
+  } catch (error) {
+    clearAuthSession();
+    document.querySelector("#leaderboard-status").textContent =
+      `登入狀態已清除：${error.message}`;
+  }
+}
+
+async function refreshAuthToken() {
+  if (!authSession?.refreshToken || !firebaseApiKey) {
+    clearAuthSession();
+    throw new Error("請重新登入後再上傳。");
+  }
+  const response = await fetch(
+    `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(firebaseApiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: authSession.refreshToken,
+      }),
+    },
+  );
+  const data = await readFirebaseResponse(response);
+  saveAuthSession({
+    email: authSession.email,
+    uid: data.user_id,
+    idToken: data.id_token,
+    refreshToken: data.refresh_token,
+    expiresAt: Date.now() + Number(data.expires_in) * 1000,
+  });
+}
+
+async function getValidAuthToken() {
+  if (!authSession) {
+    return null;
+  }
+  if (authSession.expiresAt <= Date.now() + 60_000) {
+    await refreshAuthToken();
+  }
+  return authSession?.idToken ?? null;
+}
+
+async function authenticate(email, password, mode) {
+  const operation = mode === "register" ? "signUp" : "signInWithPassword";
+  const endpoint = `https://identitytoolkit.googleapis.com/v1/accounts:${operation}?key=${encodeURIComponent(firebaseApiKey)}`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, returnSecureToken: true }),
+  });
+  const data = await readFirebaseResponse(response);
+  saveAuthSession({
+    email: data.email,
+    uid: data.localId,
+    idToken: data.idToken,
+    refreshToken: data.refreshToken,
+    expiresAt: Date.now() + Number(data.expiresIn) * 1000,
+  });
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const isRegister = mode === "register";
+  document.querySelector("#auth-dialog-title").textContent =
+    isRegister ? "建立帳號後上傳排名" : "登入後上傳排名";
+  document.querySelector("#auth-dialog-description").textContent =
+    isRegister
+      ? "使用電子郵件和密碼建立 Firebase 帳號。"
+      : "請登入帳號；還沒有帳號的話可以直接註冊。";
+  document.querySelector("#auth-password").autocomplete =
+    isRegister ? "new-password" : "current-password";
+  document.querySelector("#auth-password-confirm-wrap").hidden = !isRegister;
+  const passwordConfirm = document.querySelector("#auth-password-confirm");
+  passwordConfirm.required = isRegister;
+  passwordConfirm.disabled = !isRegister;
+  document.querySelector("#auth-mode-toggle").textContent =
+    isRegister ? "已有帳號？登入" : "建立新帳號";
+  document.querySelector("#submit-auth").textContent =
+    isRegister ? "註冊並登入" : "登入";
+  document.querySelector("#auth-error").textContent = "";
+}
+
+function openAuthDialog() {
+  setAuthMode("login");
+  document.querySelector("#auth-email").value = authSession?.email ?? "";
+  document.querySelector("#auth-password").value = "";
+  document.querySelector("#auth-password-confirm").value = "";
+  document.querySelector("#auth-dialog").showModal();
+  document.querySelector("#auth-email").focus();
+}
+
+function openUploadDialog(mode = "upload") {
+  uploadDialogMode = mode;
+  document.querySelector("#upload-error").textContent = "";
+  document.querySelector("#upload-dialog-title").textContent =
+    mode === "name" ? "更改玩家姓名" : "上傳排行榜";
+  document.querySelector("#upload-form button[type='submit']").textContent =
+    mode === "name" ? "儲存姓名" : "確認上傳";
+  document.querySelector("#player-name").value = getSavedPlayerName();
+  document.querySelector("#upload-dialog").showModal();
+  document.querySelector("#player-name").focus();
+}
+
+function getSavedPlayerName() {
+  if (!authSession?.uid) {
+    return "";
+  }
+  return localStorage.getItem(`mazePlayerName:${authSession.uid}`) ?? "";
+}
+
+async function readOwnMazeRecords(uid, idToken) {
+  const response = await fetch(
+    `${realtimeDatabaseUrl}/maze/${encodeURIComponent(uid)}.json?auth=${encodeURIComponent(idToken)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`讀取個人排行榜失敗（HTTP ${response.status}），無法確認是否為新紀錄。`);
+  }
+  return getUserMazeRecords(await response.json());
+}
+
+function setRankEligibilityMessage(message) {
+  document.querySelector("#challenge-result").textContent =
+    `${challengeResultSummary}${message ? `｜${message}` : ""}`;
+}
+
+async function updatePendingRankEligibility() {
+  const button = document.querySelector("#upload-score");
+  const checkId = ++rankEligibilityCheckId;
+  const checkedRecord = pendingRankRecord;
+  const checkedUid = authSession?.uid;
+  button.hidden = true;
+  button.disabled = true;
+  if (!checkedRecord || !realtimeDatabaseUrl) {
+    return false;
+  }
+  if (!checkedUid) {
+    button.hidden = false;
+    button.disabled = false;
+    setRankEligibilityMessage("登入後會檢查這張迷宮的個人最佳成績。");
+    return true;
+  }
+
+  setRankEligibilityMessage("正在檢查這張迷宮的個人最佳成績……");
+  try {
+    const idToken = await getValidAuthToken();
+    if (!idToken) {
+      throw new Error("登入已失效，請重新登入後再檢查成績。");
+    }
+    const records = await readOwnMazeRecords(checkedUid, idToken);
+    if (checkId !== rankEligibilityCheckId || checkedRecord !== pendingRankRecord) {
+      return false;
+    }
+    const bestRecord = records
+      .filter((record) => record.mazeCode === checkedRecord.mazeCode)
+      .reduce((best, record) => !best || record.score > best.score ? record : best, null);
+    if (bestRecord && checkedRecord.score <= bestRecord.score) {
+      setRankEligibilityMessage(
+        `你的個人最佳是 ${bestRecord.score} 分，本次 ${checkedRecord.score} 分未超越最佳成績，不提供上傳。`,
+      );
+      return false;
+    }
+    button.hidden = false;
+    button.disabled = false;
+    setRankEligibilityMessage(
+      bestRecord
+        ? `本次 ${checkedRecord.score} 分，超越個人最佳 ${bestRecord.score} 分，可以上傳。`
+        : "這是你在此迷宮的第一筆紀錄，可以上傳。",
+    );
+    return true;
+  } catch (error) {
+    if (checkId === rankEligibilityCheckId) {
+      setRankEligibilityMessage(`無法確認個人最佳成績：${error.message}`);
+    }
+    return false;
+  }
+}
+
+async function uploadPendingScore(name) {
+  if (!pendingRankRecord) {
+    return;
+  }
+  const uploadButton = document.querySelector("#upload-score");
+  if (!realtimeDatabaseUrl) {
+    setRankEligibilityMessage("排行榜資料庫尚未連線，無法上傳。");
+    uploadButton.disabled = true;
+    return;
+  }
+  uploadButton.disabled = true;
+  setRankEligibilityMessage("正在檢查成績並上傳排行榜……");
+  try {
+    const idToken = await getValidAuthToken();
+    if (!idToken || !authSession?.uid) {
+      throw new Error("請先登入再上傳排名。");
+    }
+    const uid = authSession.uid;
+    const mazeCode = pendingRankRecord.mazeCode;
+    const recordUrl =
+      `${realtimeDatabaseUrl}/maze/${encodeURIComponent(uid)}/${encodeURIComponent(mazeCode)}.json?auth=${encodeURIComponent(idToken)}`;
+    const existingRecords = await readOwnMazeRecords(uid, idToken);
+    const bestRecord = existingRecords
+      .filter((record) => record.mazeCode === mazeCode)
+      .reduce((best, record) => !best || record.score > best.score ? record : best, null);
+    if (bestRecord && pendingRankRecord.score <= bestRecord.score) {
+      uploadButton.hidden = true;
+      setRankEligibilityMessage(
+        `你的個人最佳是 ${bestRecord.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
+      );
+      return;
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const etagResponse = await fetch(recordUrl, {
+        headers: { "X-Firebase-ETag": "true" },
+      });
+      if (!etagResponse.ok) {
+        throw new Error(`讀取迷宮最佳紀錄失敗（HTTP ${etagResponse.status}）。`);
+      }
+      const etag = etagResponse.headers.get("ETag");
+      if (!etag) {
+        throw new Error("資料庫未提供紀錄版本，無法安全更新個人最佳成績。");
+      }
+      const currentRecord = getLeaderboardEntry(await etagResponse.json());
+      if (currentRecord && pendingRankRecord.score <= currentRecord.score) {
+        uploadButton.hidden = true;
+        setRankEligibilityMessage(
+          `你的個人最佳是 ${currentRecord.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
+        );
+        return;
+      }
+      const response = await fetch(recordUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "If-Match": etag,
+        },
+        body: JSON.stringify({
+          ...pendingRankRecord,
+          name,
+          createdAt: { ".sv": "timestamp" },
+        }),
+      });
+      if (response.status === 412 && attempt === 0) {
+        const latestRecords = await readOwnMazeRecords(uid, idToken);
+        const latestBest = latestRecords
+          .filter((record) => record.mazeCode === mazeCode)
+          .reduce((best, record) => !best || record.score > best.score ? record : best, null);
+        if (latestBest && pendingRankRecord.score <= latestBest.score) {
+          uploadButton.hidden = true;
+          setRankEligibilityMessage(
+            `其他紀錄已更新為 ${latestBest.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
+          );
+          return;
+        }
+        continue;
+      }
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error("登入已過期或資料庫規則未允許已登入用戶更新紀錄，請重新登入並檢查 Rules。");
+        }
+        throw new Error(`Firebase 寫入失敗（HTTP ${response.status}）。`);
+      }
+      localStorage.setItem(`mazePlayerName:${uid}`, name);
+      pendingRankRecord = null;
+      rankEligibilityCheckId += 1;
+      uploadButton.hidden = true;
+      setRankEligibilityMessage("排行榜個人最佳成績上傳成功。");
+      await refreshLeaderboard();
+      document.querySelector("#leaderboard-maze-filter").value = mazeCode;
+      renderLeaderboard();
+      return;
+    }
+    throw new Error("排行榜同時有其他更新，請重新評分後再試。");
+  } catch (error) {
+    setRankEligibilityMessage(`上傳失敗：${error.message}`);
+    uploadButton.disabled = false;
+  }
+}
+
 document.querySelector("#open-challenge").addEventListener("click", openChallenge);
 document.querySelector("#close-challenge").addEventListener("click", closeChallenge);
-document.querySelector("#new-challenge").addEventListener("click", createChallenge);
+document.querySelector("#new-challenge").addEventListener("click", () => createChallenge());
 document.querySelector("#submit-algorithm").addEventListener("click", submitAlgorithm);
+document.querySelector("#load-maze-code").addEventListener("click", loadMazeFromCode);
+document.querySelector("#maze-code-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    loadMazeFromCode();
+  }
+});
+document.querySelector("#refresh-leaderboard").addEventListener("click", refreshLeaderboard);
+document.querySelector("#leaderboard-maze-filter").addEventListener("change", renderLeaderboard);
+document.querySelector("#upload-score").addEventListener("click", () => {
+  if (!pendingRankRecord) {
+    return;
+  }
+  if (!authSession) {
+    openAuthDialog();
+  } else {
+    updatePendingRankEligibility().then((eligible) => {
+      if (!eligible) {
+        return;
+      }
+      const savedName = getSavedPlayerName();
+      if (savedName) {
+        uploadPendingScore(savedName);
+      } else {
+        openUploadDialog();
+      }
+    });
+  }
+});
+document.querySelector("#change-player-name").addEventListener("click", () => {
+  if (authSession) {
+    openUploadDialog("name");
+  }
+});
+document.querySelector("#open-auth").addEventListener("click", openAuthDialog);
+document.querySelector("#sign-out").addEventListener("click", () => {
+  clearAuthSession();
+  document.querySelector("#leaderboard-status").textContent = "已登出。";
+  if (pendingRankRecord) {
+    updatePendingRankEligibility();
+  }
+});
+document.querySelector("#cancel-auth").addEventListener("click", () => {
+  document.querySelector("#auth-dialog").close();
+});
+document.querySelector("#auth-mode-toggle").addEventListener("click", () => {
+  setAuthMode(authMode === "login" ? "register" : "login");
+});
+document.querySelector("#auth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = document.querySelector("#auth-email").value.trim();
+  const password = document.querySelector("#auth-password").value;
+  const passwordConfirm = document.querySelector("#auth-password-confirm").value;
+  const submitButton = document.querySelector("#submit-auth");
+  const errorMessage = document.querySelector("#auth-error");
+  if (!firebaseApiKey) {
+    errorMessage.textContent = "Firebase 尚未初始化，請稍後再試。";
+    return;
+  }
+  if (authMode === "register" && password !== passwordConfirm) {
+    errorMessage.textContent = "兩次輸入的密碼不一致。";
+    return;
+  }
+  submitButton.disabled = true;
+  errorMessage.textContent = authMode === "register" ? "正在建立帳號……" : "正在登入……";
+  try {
+    await authenticate(email, password, authMode);
+    document.querySelector("#auth-dialog").close();
+    if (pendingRankRecord) {
+      const eligible = await updatePendingRankEligibility();
+      if (!eligible) {
+        return;
+      }
+      const savedName = getSavedPlayerName();
+      if (savedName) {
+        uploadPendingScore(savedName);
+      } else {
+        openUploadDialog();
+      }
+    }
+  } catch (error) {
+    errorMessage.textContent = error.message;
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+document.querySelector("#cancel-upload").addEventListener("click", () => {
+  document.querySelector("#upload-dialog").close();
+});
+document.querySelector("#upload-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const nameInput = document.querySelector("#player-name");
+  const name = nameInput.value.trim();
+  if (!name || Array.from(name).length > 30 || /[\u0000-\u001f\u007f]/.test(name)) {
+    document.querySelector("#upload-error").textContent = "姓名請輸入 1–30 個字，且不要包含控制字元。";
+    return;
+  }
+  document.querySelector("#upload-dialog").close();
+  if (uploadDialogMode === "name") {
+    if (!authSession?.uid) {
+      return;
+    }
+    localStorage.setItem(`mazePlayerName:${authSession.uid}`, name);
+    document.querySelector("#leaderboard-status").textContent = "玩家姓名已更新；之後上傳會使用新姓名。";
+    return;
+  }
+  updatePendingRankEligibility().then((eligible) => {
+    if (eligible) {
+      uploadPendingScore(name);
+    }
+  });
+});
 const algorithmEditor = document.querySelector("#algorithm-code");
 const codeHint = document.querySelector("#code-hint");
 const completionItems = [
@@ -899,3 +1643,4 @@ editor.on("inputRead", (cm, change) => {
 editor.on("change", updateEditorAssist);
 updateEditorAssist();
 generateAndSolve();
+initializeLeaderboard();

@@ -112,6 +112,22 @@
     .challenge-map { display: block; width: 100%; height: auto; }
     .challenge-help { color: #526078; line-height: 1.6; }
     .challenge-actions { margin-top: 14px; }
+    .leaderboard-table-wrap { overflow-x: auto; }
+    .leaderboard-table { width: 100%; border-collapse: collapse; text-align: left; }
+    .leaderboard-table th, .leaderboard-table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid #dce3ef;
+      white-space: nowrap;
+    }
+    .leaderboard-table th { background: #f3f6fb; }
+    #leaderboard-status { min-height: 1.5em; color: #526078; }
+    #upload-dialog { max-width: min(420px, calc(100vw - 32px)); border: 1px solid #dce3ef; border-radius: 10px; }
+    #upload-dialog::backdrop { background: #17203388; }
+    #player-name { width: 100%; margin: 8px 0; padding: 10px; font: inherit; }
+    #auth-dialog { max-width: min(440px, calc(100vw - 32px)); border: 1px solid #dce3ef; border-radius: 10px; }
+    #auth-dialog::backdrop { background: #17203388; }
+    #auth-email, #auth-password { width: 100%; margin: 8px 0 14px; padding: 10px; font: inherit; }
+    #auth-password-confirm { width: 100%; margin: 8px 0 14px; padding: 10px; font: inherit; }
     .CodeMirror {
       height: auto;
       min-height: 320px;
@@ -173,6 +189,41 @@
   <h1>隨機迷宮：BFS 與 DFS</h1>
   <p class="intro">每次開啟或重新生成，都會建立一座新的迷宮，並隨機挑選起點和終點。觀察 BFS、DFS 的搜尋動畫，或進入挑戰自己寫搜尋算法。</p>
 
+  <section id="leaderboard-panel" class="panel">
+    <div class="controls">
+      <h2>玩家排行榜</h2>
+      <span id="auth-status" role="status">尚未登入</span>
+      <button id="open-auth" type="button">登入／註冊</button>
+      <button id="change-player-name" type="button" hidden>更改玩家姓名</button>
+      <button id="sign-out" type="button" hidden>登出</button>
+      <label for="leaderboard-maze-filter">依迷宮碼篩選</label>
+      <select id="leaderboard-maze-filter" aria-label="依迷宮碼篩選排行榜">
+        <option value="">所有迷宮</option>
+      </select>
+      <button id="refresh-leaderboard" type="button">重新整理排行</button>
+    </div>
+    <p id="leaderboard-status" role="status" aria-live="polite">正在載入玩家紀錄……</p>
+    <p class="challenge-help">排行榜公開顯示玩家姓名與成績，請使用暱稱。上傳需要登入；首次上傳輸入姓名後會記住在此瀏覽器，下次自動沿用。每位玩家每張迷宮只保留個人最佳成績；同分或較低分數不能再次上傳。
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th scope="col">序號／排名</th>
+            <th scope="col">玩家</th>
+            <th scope="col">分數</th>
+            <th scope="col">難度</th>
+            <th scope="col">迷宮碼</th>
+            <th scope="col">探索格數</th>
+            <th scope="col">路徑步數</th>
+            <th scope="col">實際等待</th>
+            <th scope="col">完成時間</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-records"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section id="comparison-panel" class="panel">
     <div class="controls">
       <button id="generate" type="button">重新生成迷宮</button>
@@ -193,14 +244,22 @@
   <section id="challenge-panel" class="panel" hidden>
     <div class="controls">
       <button id="close-challenge" type="button">返回比較模式</button>
+      <button id="new-challenge" type="button">重新生成隨機迷宮</button>
     </div>
+    <div class="controls">
+      <label for="maze-code-input"><strong>用迷宮碼挑戰相同地圖</strong></label>
+      <input id="maze-code-input" type="text" maxlength="11" list="maze-code-options" placeholder="MZ-1A2B3C4D" autocomplete="off">
+      <datalist id="maze-code-options"></datalist>
+      <button id="load-maze-code" type="button">載入迷宮碼</button>
+    </div>
+    <p class="challenge-help">每次會隨機生成迷宮，也可以輸入排行榜上的迷宮碼重現同一張地圖。完成評分後會依該迷宮的最短路徑長度與 BFS 必須探索的格數，顯示 1–10 難度級別。</p>
     <p id="challenge-endpoints" class="challenge-help"></p>
     <p class="challenge-help">請自行完成 JavaScript 的搜尋算法，再按「完成並評分」。系統會在隔離的執行環境中執行你的程式、驗證路徑，並依路徑長度與探索格數評分。提示：BFS 使用先進先出的佇列；DFS 使用後進先出的堆疊或遞迴。</p>
-    <p class="challenge-help">評分方式：路徑品質最高 40 分、探索格數最高 40 分、程式執行效率最高 20 分；執行效率依程式編譯與執行時間計算：低於 1 毫秒得 20 分、低於 10 毫秒得 16 分、低於 100 毫秒得 12 分、低於 1 秒得 8 分，其餘在時限內完成得 4 分。未抵達得 1 分；超過 5 秒會停止執行。時間複雜度參考：理想 BFS／DFS 為 O(V + E)，V 是可走格數、E 是相鄰連線數。</p>
+    <p class="challenge-help">評分方式：路徑品質最高 40 分、探索格數最高 40 分、實際等待時間最高 20 分。探索格數越少，探索分越高；從按下「完成並評分」到迷宮動畫結束的總等待時間越短，時間分越高（以 5 秒為 0 分基準線性遞減）。迷宮難度 1–10 依參考 BFS 的最短路徑長度與探索格數計算；同難度可作大致比較，迷宮碼相同才代表完全相同的地圖。未抵達得 1 分；算法執行超過 5 秒會停止。結果會分別顯示實際等待時間與算法本身的執行時間；時間複雜度參考：理想 BFS／DFS 為 O(V + E)，V 是可走格數、E 是相鄰連線數。</p>
     <div class="challenge-column">
       <strong>提供給算法的資料與 API</strong>
       <pre id="challenge-api"></pre>
-      <p id="algorithm-help" class="challenge-help">函式必須命名為 <code>solve</code>，並回傳 <code>{ path, explored }</code>。兩者都是格子 ID 字串陣列；<code>explored</code> 要記錄呼叫 <code>getNeighbors</code> 擴展過的格子，找到終點後也要把終點列入。結果會顯示你的程式編譯與執行時間；動畫時間不列入計算。</p>
+      <p id="algorithm-help" class="challenge-help">函式必須命名為 <code>solve</code>，並回傳 <code>{ path, explored }</code>。兩者都是格子 ID 字串陣列；<code>explored</code> 要記錄呼叫 <code>getNeighbors</code> 擴展過的格子，找到終點後也要把終點列入。計分等待時間包含算法執行、結果處理及迷宮動畫。</p>
     </div>
     <div class="challenge-layout">
       <div class="challenge-column">
@@ -223,11 +282,45 @@
         <output id="challenge-result" role="status" aria-live="polite"></output>
         <div class="controls challenge-actions">
           <button id="submit-algorithm" type="button">完成並評分</button>
-          <button id="new-challenge" type="button">換一題</button>
+          <button id="upload-score" type="button" disabled hidden>上傳排名</button>
         </div>
       </div>
     </div>
   </section>
+
+  <dialog id="upload-dialog" aria-labelledby="upload-dialog-title">
+    <form id="upload-form">
+      <h2 id="upload-dialog-title">上傳排行榜</h2>
+      <label for="player-name">請輸入排行榜顯示的姓名（最多 30 字）</label>
+      <input id="player-name" type="text" maxlength="30" autocomplete="nickname" required>
+      <p id="upload-error" role="alert"></p>
+      <div class="controls">
+        <button id="cancel-upload" type="button">取消</button>
+        <button type="submit">確認上傳</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="auth-dialog" aria-labelledby="auth-dialog-title">
+    <form id="auth-form">
+      <h2 id="auth-dialog-title">登入後上傳排名</h2>
+      <p id="auth-dialog-description">請登入帳號；還沒有帳號的話可以直接註冊。</p>
+      <label for="auth-email">電子郵件</label>
+      <input id="auth-email" type="email" autocomplete="email" maxlength="254" required>
+      <label for="auth-password">密碼（至少 6 個字元）</label>
+      <input id="auth-password" type="password" autocomplete="current-password" minlength="6" required>
+      <div id="auth-password-confirm-wrap" hidden>
+        <label for="auth-password-confirm">再次輸入密碼</label>
+        <input id="auth-password-confirm" type="password" autocomplete="new-password" minlength="6">
+      </div>
+      <p id="auth-error" role="alert"></p>
+      <div class="controls">
+        <button id="auth-mode-toggle" type="button">建立新帳號</button>
+        <button id="cancel-auth" type="button">取消</button>
+        <button id="submit-auth" type="submit">登入</button>
+      </div>
+    </form>
+  </dialog>
 
   <section id="results" class="panel results" aria-live="polite">
     <article class="result">
