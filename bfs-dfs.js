@@ -920,6 +920,16 @@ function getUserMazeRecords(userRecords) {
     : Object.values(userRecords ?? {}).map(getLeaderboardEntry).filter(Boolean);
 }
 
+function normalizePlayerName(name) {
+  return name.normalize("NFKC").trim().toLowerCase();
+}
+
+function getPlayerNameKey(name) {
+  return Array.from(normalizePlayerName(name), (character) =>
+    character.codePointAt(0).toString(16),
+  ).join("-");
+}
+
 function renderLeaderboard() {
   const body = document.querySelector("#leaderboard-records");
   const filter = document.querySelector("#leaderboard-maze-filter");
@@ -952,12 +962,11 @@ function renderLeaderboard() {
   const filteredRecords = [...bestByPlayerAndMaze.values()].filter(({ mazeCode }) =>
     !filter.value || mazeCode === filter.value,
   );
-  filteredRecords.sort((first, second) => filter.value
-    ? second.score - first.score
-      || first.totalWaitMs - second.totalWaitMs
-      || first.exploredCells - second.exploredCells
-      || second.createdAt - first.createdAt
-    : second.createdAt - first.createdAt,
+  filteredRecords.sort((first, second) =>
+    second.score - first.score
+    || first.createdAt - second.createdAt
+    || first.totalWaitMs - second.totalWaitMs
+    || first.exploredCells - second.exploredCells,
   );
 
   body.replaceChildren();
@@ -984,8 +993,8 @@ function renderLeaderboard() {
 
   document.querySelector("#leaderboard-status").textContent =
     filter.value
-      ? `迷宮 ${filter.value}：${filteredRecords.length} 筆紀錄（依分數、等待時間、探索格數排序）。`
-      : `目前顯示所有玩家紀錄，共 ${filteredRecords.length} 筆；可用迷宮碼篩選。`;
+      ? `迷宮 ${filter.value}：${filteredRecords.length} 筆紀錄（依分數排序；同分時完成較早者優先）。`
+      : `目前顯示所有玩家紀錄，共 ${filteredRecords.length} 筆（依分數排序；同分時完成較早者優先），可用迷宮碼篩選。`;
 }
 
 async function refreshLeaderboard() {
@@ -1009,8 +1018,12 @@ async function refreshLeaderboard() {
         if (!userRecords || typeof userRecords !== "object") {
           return [];
         }
+        const currentName = typeof userRecords.profile?.name === "string"
+          ? userRecords.profile.name
+          : null;
         return getUserMazeRecords(userRecords).map((record) => ({
           ...record,
+          name: currentName ?? record.name,
           userId: uid,
         }));
       })
@@ -1139,6 +1152,7 @@ async function restoreAuthSession() {
     clearAuthSession();
     document.querySelector("#leaderboard-status").textContent =
       `登入狀態已清除：${error.message}`;
+    return;
   }
 }
 
@@ -1227,23 +1241,141 @@ function openAuthDialog() {
   document.querySelector("#auth-email").focus();
 }
 
-function openUploadDialog(mode = "upload") {
+async function openUploadDialog(mode = "upload") {
   uploadDialogMode = mode;
-  document.querySelector("#upload-error").textContent = "";
+  const errorMessage = document.querySelector("#upload-error");
+  errorMessage.textContent = "";
   document.querySelector("#upload-dialog-title").textContent =
     mode === "name" ? "更改玩家姓名" : "上傳排行榜";
   document.querySelector("#upload-form button[type='submit']").textContent =
     mode === "name" ? "儲存姓名" : "確認上傳";
-  document.querySelector("#player-name").value = getSavedPlayerName();
+  const nameInput = document.querySelector("#player-name");
+  nameInput.value = "";
+  if (authSession?.uid) {
+    try {
+      const idToken = await getValidAuthToken();
+      const profile = await readPlayerProfile(authSession.uid, idToken);
+      nameInput.value = profile?.name ?? "";
+    } catch (error) {
+      errorMessage.textContent = `無法讀取已儲存的玩家姓名：${error.message}`;
+    }
+  }
   document.querySelector("#upload-dialog").showModal();
-  document.querySelector("#player-name").focus();
+  nameInput.focus();
 }
 
-function getSavedPlayerName() {
-  if (!authSession?.uid) {
-    return "";
+async function readPlayerProfile(uid, idToken) {
+  if (!idToken) {
+    throw new Error("請重新登入後再試。");
   }
-  return localStorage.getItem(`mazePlayerName:${authSession.uid}`) ?? "";
+  const response = await fetch(
+    `${realtimeDatabaseUrl}/maze/${encodeURIComponent(uid)}/profile.json?auth=${encodeURIComponent(idToken)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`讀取玩家資料失敗（HTTP ${response.status}）。`);
+  }
+  const profile = await response.json();
+  return profile && typeof profile.name === "string" ? profile : null;
+}
+
+async function readRegisteredNames() {
+  const response = await fetch(`${realtimeDatabaseUrl}/maze.json`);
+  if (!response.ok) {
+    throw new Error(`檢查重複姓名失敗（HTTP ${response.status}）。`);
+  }
+  const data = await response.json();
+  return data && typeof data === "object" ? data : {};
+}
+
+function describeDatabasePermissionError(response, resource) {
+  if (response.status === 401 || response.status === 403) {
+    return `Firebase Rules 拒絕${resource}（HTTP ${response.status}）。請到 Realtime Database → Rules，發布專案中的 database.rules.json。`;
+  }
+  return `${resource}失敗（HTTP ${response.status}）。`;
+}
+
+async function savePlayerName(name, idToken = null) {
+  if (!authSession?.uid) {
+    throw new Error("請先登入後再設定玩家姓名。");
+  }
+  const token = idToken ?? await getValidAuthToken();
+  if (!token) {
+    throw new Error("登入已失效，請重新登入後再試。");
+  }
+
+  const uid = authSession.uid;
+  const profile = await readPlayerProfile(uid, token);
+  const normalizedName = normalizePlayerName(name);
+  const nameKey = getPlayerNameKey(name);
+  const registeredUsers = await readRegisteredNames();
+  const duplicateUser = Object.entries(registeredUsers).find(([otherUid, userData]) => {
+    if (otherUid === uid || !userData || typeof userData !== "object") {
+      return false;
+    }
+    const profileName = userData.profile?.name;
+    if (
+      typeof profileName === "string"
+      && normalizePlayerName(profileName) === normalizedName
+    ) {
+      return true;
+    }
+    return getUserMazeRecords(userData).some((record) =>
+      normalizePlayerName(record.name) === normalizedName,
+    );
+  });
+  if (duplicateUser) {
+    throw new Error("這個玩家姓名已有人使用，請換一個名稱。");
+  }
+
+  const indexUrl =
+    `${realtimeDatabaseUrl}/maze/playerNames/${encodeURIComponent(nameKey)}.json?auth=${encodeURIComponent(token)}`;
+  const indexResponse = await fetch(indexUrl);
+  if (!indexResponse.ok) {
+    throw new Error(describeDatabasePermissionError(indexResponse, "讀取玩家姓名索引"));
+  }
+  const registeredUid = await indexResponse.json();
+  if (registeredUid && registeredUid !== uid) {
+    throw new Error("這個玩家姓名已有人使用，請換一個名稱。");
+  }
+
+  const updates = {
+    [`maze/${encodeURIComponent(uid)}/profile`]: { name, nameKey },
+    [`maze/playerNames/${nameKey}`]: uid,
+  };
+  if (profile?.name) {
+    const oldNameKey = getPlayerNameKey(profile.name);
+    if (oldNameKey !== nameKey) {
+      const oldIndexResponse = await fetch(
+        `${realtimeDatabaseUrl}/maze/playerNames/${encodeURIComponent(oldNameKey)}.json?auth=${encodeURIComponent(token)}`,
+      );
+      if (!oldIndexResponse.ok) {
+        throw new Error(`讀取舊姓名索引失敗（HTTP ${oldIndexResponse.status}）。`);
+      }
+      if ((await oldIndexResponse.json()) === uid) {
+        updates[`maze/playerNames/${oldNameKey}`] = null;
+      }
+    }
+  }
+
+  const response = await fetch(
+    `${realtimeDatabaseUrl}/.json?auth=${encodeURIComponent(token)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    },
+  );
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      const currentIndexResponse = await fetch(indexUrl);
+      if (currentIndexResponse.ok && (await currentIndexResponse.json()) !== uid) {
+        throw new Error("這個玩家姓名剛被其他人使用，請換一個名稱。");
+      }
+      throw new Error(describeDatabasePermissionError(response, "儲存玩家姓名或索引"));
+    }
+    throw new Error(`儲存玩家姓名失敗（HTTP ${response.status}）。`);
+  }
+  return { name, nameKey };
 }
 
 async function readOwnMazeRecords(uid, idToken) {
@@ -1315,13 +1447,13 @@ async function updatePendingRankEligibility() {
 
 async function uploadPendingScore(name) {
   if (!pendingRankRecord) {
-    return;
+    return false;
   }
   const uploadButton = document.querySelector("#upload-score");
   if (!realtimeDatabaseUrl) {
     setRankEligibilityMessage("排行榜資料庫尚未連線，無法上傳。");
     uploadButton.disabled = true;
-    return;
+    return false;
   }
   uploadButton.disabled = true;
   setRankEligibilityMessage("正在檢查成績並上傳排行榜……");
@@ -1332,6 +1464,7 @@ async function uploadPendingScore(name) {
     }
     const uid = authSession.uid;
     const mazeCode = pendingRankRecord.mazeCode;
+    await savePlayerName(name, idToken);
     const recordUrl =
       `${realtimeDatabaseUrl}/maze/${encodeURIComponent(uid)}/${encodeURIComponent(mazeCode)}.json?auth=${encodeURIComponent(idToken)}`;
     const existingRecords = await readOwnMazeRecords(uid, idToken);
@@ -1343,7 +1476,7 @@ async function uploadPendingScore(name) {
       setRankEligibilityMessage(
         `你的個人最佳是 ${bestRecord.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
       );
-      return;
+      return false;
     }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1363,7 +1496,7 @@ async function uploadPendingScore(name) {
         setRankEligibilityMessage(
           `你的個人最佳是 ${currentRecord.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
         );
-        return;
+        return false;
       }
       const response = await fetch(recordUrl, {
         method: "PUT",
@@ -1387,7 +1520,7 @@ async function uploadPendingScore(name) {
           setRankEligibilityMessage(
             `其他紀錄已更新為 ${latestBest.score} 分，本次 ${pendingRankRecord.score} 分未超越最佳成績，不提供上傳。`,
           );
-          return;
+          return false;
         }
         continue;
       }
@@ -1397,7 +1530,6 @@ async function uploadPendingScore(name) {
         }
         throw new Error(`Firebase 寫入失敗（HTTP ${response.status}）。`);
       }
-      localStorage.setItem(`mazePlayerName:${uid}`, name);
       pendingRankRecord = null;
       rankEligibilityCheckId += 1;
       uploadButton.hidden = true;
@@ -1405,12 +1537,16 @@ async function uploadPendingScore(name) {
       await refreshLeaderboard();
       document.querySelector("#leaderboard-maze-filter").value = mazeCode;
       renderLeaderboard();
-      return;
+      return true;
     }
     throw new Error("排行榜同時有其他更新，請重新評分後再試。");
   } catch (error) {
     setRankEligibilityMessage(`上傳失敗：${error.message}`);
+    if (document.querySelector("#upload-dialog").open) {
+      document.querySelector("#upload-error").textContent = error.message;
+    }
     uploadButton.disabled = false;
+    return false;
   }
 }
 
@@ -1433,16 +1569,20 @@ document.querySelector("#upload-score").addEventListener("click", () => {
   if (!authSession) {
     openAuthDialog();
   } else {
-    updatePendingRankEligibility().then((eligible) => {
+    (async () => {
+      const eligible = await updatePendingRankEligibility();
       if (!eligible) {
         return;
       }
-      const savedName = getSavedPlayerName();
-      if (savedName) {
-        uploadPendingScore(savedName);
+      const idToken = await getValidAuthToken();
+      const profile = await readPlayerProfile(authSession.uid, idToken);
+      if (profile?.name) {
+        uploadPendingScore(profile.name);
       } else {
         openUploadDialog();
       }
+    })().catch((error) => {
+      setRankEligibilityMessage(`無法讀取玩家姓名：${error.message}`);
     });
   }
 });
@@ -1490,9 +1630,10 @@ document.querySelector("#auth-form").addEventListener("submit", async (event) =>
       if (!eligible) {
         return;
       }
-      const savedName = getSavedPlayerName();
-      if (savedName) {
-        uploadPendingScore(savedName);
+      const idToken = await getValidAuthToken();
+      const profile = await readPlayerProfile(authSession.uid, idToken);
+      if (profile?.name) {
+        uploadPendingScore(profile.name);
       } else {
         openUploadDialog();
       }
@@ -1506,7 +1647,7 @@ document.querySelector("#auth-form").addEventListener("submit", async (event) =>
 document.querySelector("#cancel-upload").addEventListener("click", () => {
   document.querySelector("#upload-dialog").close();
 });
-document.querySelector("#upload-form").addEventListener("submit", (event) => {
+document.querySelector("#upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const nameInput = document.querySelector("#player-name");
   const name = nameInput.value.trim();
@@ -1514,20 +1655,41 @@ document.querySelector("#upload-form").addEventListener("submit", (event) => {
     document.querySelector("#upload-error").textContent = "姓名請輸入 1–30 個字，且不要包含控制字元。";
     return;
   }
-  document.querySelector("#upload-dialog").close();
+  const submitButton = document.querySelector("#upload-form button[type='submit']");
+  submitButton.disabled = true;
+  document.querySelector("#upload-error").textContent = "";
   if (uploadDialogMode === "name") {
     if (!authSession?.uid) {
+      submitButton.disabled = false;
       return;
     }
-    localStorage.setItem(`mazePlayerName:${authSession.uid}`, name);
-    document.querySelector("#leaderboard-status").textContent = "玩家姓名已更新；之後上傳會使用新姓名。";
+    try {
+      await savePlayerName(name);
+      document.querySelector("#upload-dialog").close();
+      document.querySelector("#leaderboard-status").textContent =
+        "玩家姓名已更新並儲存到資料庫。";
+      await refreshLeaderboard();
+    } catch (error) {
+      document.querySelector("#upload-error").textContent = error.message;
+    } finally {
+      submitButton.disabled = false;
+    }
     return;
   }
-  updatePendingRankEligibility().then((eligible) => {
-    if (eligible) {
-      uploadPendingScore(name);
+  try {
+    const eligible = await updatePendingRankEligibility();
+    if (!eligible) {
+      document.querySelector("#upload-error").textContent =
+        "這次分數未高於你的個人最佳，或目前無法確認資格，請查看挑戰結果後再試。";
+      return;
     }
-  });
+    const uploaded = await uploadPendingScore(name);
+    if (uploaded) {
+      document.querySelector("#upload-dialog").close();
+    }
+  } finally {
+    submitButton.disabled = false;
+  }
 });
 const algorithmEditor = document.querySelector("#algorithm-code");
 const codeHint = document.querySelector("#code-hint");
