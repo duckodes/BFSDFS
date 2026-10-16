@@ -318,6 +318,47 @@ function renderMaze(svg, cells, start, goal, result, algorithm, showPlayer = fal
   }
 }
 
+function getChallengeCellFromPointer(event) {
+  const map = document.querySelector("#challenge-map");
+  const bounds = map.getBoundingClientRect();
+  const relativeX = (event.clientX - bounds.left) / bounds.width;
+  const relativeY = (event.clientY - bounds.top) / bounds.height;
+  if (
+    relativeX < 0 || relativeX >= 1
+    || relativeY < 0 || relativeY >= 1
+  ) {
+    return null;
+  }
+  const column = Math.floor(relativeX * COLUMNS);
+  const row = Math.floor(relativeY * ROWS);
+  return cellKey(row, column);
+}
+
+function showChallengeCellId(event) {
+  const key = getChallengeCellFromPointer(event);
+  if (key) {
+    document.querySelector("#challenge-cell-id").textContent = key;
+  }
+}
+
+const challengeMap = document.querySelector("#challenge-map");
+challengeMap.addEventListener("pointermove", (event) => {
+  if (event.pointerType === "mouse") {
+    showChallengeCellId(event);
+  }
+});
+challengeMap.addEventListener("pointerleave", (event) => {
+  if (event.pointerType === "mouse") {
+    document.querySelector("#challenge-cell-id").textContent =
+      "移動滑鼠或點選迷宮格查看";
+  }
+});
+challengeMap.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "touch" || event.pointerType === "pen") {
+    showChallengeCellId(event);
+  }
+});
+
 let comparisonRunId = 0;
 
 function pause(milliseconds) {

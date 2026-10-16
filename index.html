@@ -110,6 +110,7 @@
     }
     .challenge-map-wrap { margin-top: 12px; }
     .challenge-map { display: block; width: 100%; height: auto; }
+    .challenge-cell-id { min-height: 1.5em; margin: 8px 0 0; font-weight: 600; }
     .challenge-help { color: #526078; line-height: 1.6; }
     .challenge-actions { margin-top: 14px; }
     .leaderboard-table-wrap { overflow-x: auto; }
@@ -278,6 +279,7 @@
         <div class="challenge-map-wrap">
           <svg id="challenge-map" class="challenge-map" role="img" aria-label="挑戰模式迷宮"></svg>
         </div>
+        <p class="challenge-cell-id">格子 ID：<output id="challenge-cell-id" aria-live="polite">移動滑鼠或點選迷宮格查看</output></p>
         <output id="challenge-message" role="status" aria-live="polite"></output>
         <output id="challenge-result" role="status" aria-live="polite"></output>
         <div class="controls challenge-actions">
